@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express, { Request, Response } from "express";
 import { registerReadTools } from "./tools/readTools.js";
@@ -15,7 +16,17 @@ const server = new McpServer({
 registerReadTools(server);
 registerWriteTools(server);
 
-// ── HTTP Transport ────────────────────────────────────────────────────────────
+// ── Stdio Transport (Claude Desktop / subprocess) ─────────────────────────────
+
+async function startStdioServer(): Promise<void> {
+  // IMPORTANT: stdout is the JSON-RPC channel — never write to it directly.
+  // Use console.error() for all logging in stdio mode.
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error("Google Docs MCP server running on stdio");
+}
+
+// ── HTTP Transport (remote / network usage) ───────────────────────────────────
 
 async function startHTTPServer(): Promise<void> {
   const app = express();
@@ -58,8 +69,18 @@ async function startHTTPServer(): Promise<void> {
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
+// Default to stdio (Claude Desktop). Set MCP_TRANSPORT=http for network mode.
 
-startHTTPServer().catch((err: unknown) => {
-  console.error("Failed to start server:", err);
-  process.exit(1);
-});
+const transport = process.env.MCP_TRANSPORT ?? "stdio";
+
+if (transport === "http") {
+  startHTTPServer().catch((err: unknown) => {
+    console.error("Failed to start HTTP server:", err);
+    process.exit(1);
+  });
+} else {
+  startStdioServer().catch((err: unknown) => {
+    console.error("Failed to start stdio server:", err);
+    process.exit(1);
+  });
+}
