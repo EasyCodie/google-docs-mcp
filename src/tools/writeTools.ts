@@ -3,10 +3,12 @@ import { getDocsClient, getDriveClient, handleGoogleError } from "../services/go
 import {
   CreateDocumentSchema,
   UpdateDocumentSchema,
+  FormatDocumentSchema,
   CreateDocumentInput,
   UpdateDocumentInput,
+  FormatDocumentInput,
 } from "../schemas/index.js";
-import { CreateDocumentResult, UpdateDocumentResult } from "../types.js";
+import { CreateDocumentResult, UpdateDocumentResult, FormatDocumentResult } from "../types.js";
 import { docs_v1 } from "googleapis";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -18,6 +20,27 @@ function buildAppendRequest(text: string, endIndex: number): docs_v1.Schema$Requ
       text,
     },
   };
+}
+
+function extractBodyText(body: docs_v1.Schema$Body | undefined): string {
+  if (!body?.content) return "";
+  const parts: string[] = [];
+  for (const element of body.content) {
+    if (element.paragraph) {
+      for (const pe of element.paragraph.elements ?? []) {
+        if (pe.textRun?.content) {
+          parts.push(pe.textRun.content);
+        }
+      }
+    } else if (element.table) {
+      for (const row of element.table.tableRows ?? []) {
+        for (const cell of row.tableCells ?? []) {
+          parts.push(extractBodyText(cell.content ? { content: cell.content } : undefined));
+        }
+      }
+    }
+  }
+  return parts.join("");
 }
 
 function buildReplaceRequests(
@@ -219,6 +242,170 @@ Error Handling:
         return {
           isError: true,
           content: [{ type: "text", text: `Error updating document: ${handleGoogleError(error)}` }],
+        };
+      }
+    }
+  );
+
+  // ── gdocs_format_document ─────────────────────────────────────────────────
+  server.registerTool(
+    "gdocs_format_document",
+    {
+      title: "Format Google Document",
+      description: `Format text in a Google Docs document based on exact text matching.
+Features: bold, italic, text color, font size, headings, alignment, and bullet points.
+
+Args:
+  - document_id (string, required): The Google Docs document ID
+  - requests (array, required): List of formatting operations.
+      Each item needs:
+        - match_text: Exact string to format
+        - style: { bold, italic, underline, strikethrough, fontFamily, fontSize, textColor(r,g,b), backgroundColor(r,g,b) }
+        - heading: "TITLE", "HEADING_1", etc.
+        - alignment: "START", "CENTER", "END", "JUSTIFIED"
+        - bullet_preset: "BULLET_DISC_CIRCLE_SQUARE", etc.
+
+Returns:
+  {
+    "documentId": string,
+    "title": string,
+    "revisionId": string,
+    "formattedSections": number
+  }
+
+Examples:
+  - "Make 'Summary' heading 1" -> requests=[{match_text:'Summary', heading:'HEADING_1'}]
+  - "Bold the word 'Important'" -> requests=[{match_text:'Important', style:{bold:true}}]
+  - "Turn this into a bullet list" -> requests=[{match_text:'Item 1\\nItem 2', bullet_preset:'BULLET_DISC_CIRCLE_SQUARE'}]`,
+      inputSchema: FormatDocumentSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (params: FormatDocumentInput) => {
+      try {
+        const docs = getDocsClient();
+        
+        // Fetch to find exact indices for match_text
+        const docRes = await docs.documents.get({ documentId: params.document_id });
+        const doc = docRes.data;
+        const bodyText = extractBodyText(doc.body ?? undefined);
+        
+        const apiRequests: docs_v1.Schema$Request[] = [];
+        
+        for (const req of params.requests) {
+          const matchIndex = bodyText.indexOf(req.match_text);
+          if (matchIndex === -1) {
+            console.error(`Text not found: "${req.match_text.substring(0, 20)}..."`);
+            continue; // Skip if text not found
+          }
+          
+          // Docs indices are 1-based (0 is the virtual beginning)
+          const startIndex = matchIndex + 1;
+          const endIndex = startIndex + req.match_text.length;
+          
+          const range = { startIndex, endIndex };
+          
+          // 1. Text Style
+          if (req.style) {
+            const fields: string[] = [];
+            const textStyle: docs_v1.Schema$TextStyle = {};
+            
+            if (req.style.bold !== undefined) { textStyle.bold = req.style.bold; fields.push("bold"); }
+            if (req.style.italic !== undefined) { textStyle.italic = req.style.italic; fields.push("italic"); }
+            if (req.style.underline !== undefined) { textStyle.underline = req.style.underline; fields.push("underline"); }
+            if (req.style.strikethrough !== undefined) { textStyle.strikethrough = req.style.strikethrough; fields.push("strikethrough"); }
+            if (req.style.fontFamily) {
+              textStyle.weightedFontFamily = { fontFamily: req.style.fontFamily };
+              fields.push("weightedFontFamily");
+            }
+            if (req.style.fontSize) {
+              textStyle.fontSize = { magnitude: req.style.fontSize, unit: "PT" };
+              fields.push("fontSize");
+            }
+            if (req.style.textColor) {
+              textStyle.foregroundColor = { color: { rgbColor: { red: req.style.textColor.r, green: req.style.textColor.g, blue: req.style.textColor.b } } };
+              fields.push("foregroundColor");
+            }
+            if (req.style.backgroundColor) {
+              textStyle.backgroundColor = { color: { rgbColor: { red: req.style.backgroundColor.r, green: req.style.backgroundColor.g, blue: req.style.backgroundColor.b } } };
+              fields.push("backgroundColor");
+            }
+            
+            if (fields.length > 0) {
+              apiRequests.push({
+                updateTextStyle: { range, textStyle, fields: fields.join(",") }
+              });
+            }
+          }
+          
+          // 2. Paragraph Style (Alignment & Headings)
+          if (req.heading || req.alignment) {
+            const fields: string[] = [];
+            const paragraphStyle: docs_v1.Schema$ParagraphStyle = {};
+            
+            if (req.heading) {
+              paragraphStyle.namedStyleType = req.heading;
+              fields.push("namedStyleType");
+            }
+            if (req.alignment) {
+              paragraphStyle.alignment = req.alignment;
+              fields.push("alignment");
+            }
+            
+            if (fields.length > 0) {
+              apiRequests.push({
+                updateParagraphStyle: { range, paragraphStyle, fields: fields.join(",") }
+              });
+            }
+          }
+          
+          // 3. Bullets
+          if (req.bullet_preset) {
+            apiRequests.push({
+              createParagraphBullets: { range, bulletPreset: req.bullet_preset }
+            });
+          }
+        }
+        
+        if (apiRequests.length === 0) {
+          throw new Error("No formatting applied. Either requests were empty or text to match was not found.");
+        }
+        
+        await docs.documents.batchUpdate({
+          documentId: params.document_id,
+          requestBody: { requests: apiRequests },
+        });
+
+        const updated = await docs.documents.get({ documentId: params.document_id });
+
+        const result: FormatDocumentResult = {
+          documentId: params.document_id,
+          title: updated.data.title ?? "Untitled",
+          revisionId: updated.data.revisionId ?? "",
+          formattedSections: apiRequests.length,
+        };
+
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `✅ Document formatted successfully!\n\n` +
+                `**Title**: ${result.title}\n` +
+                `**Commands processed**: ${result.formattedSections}\n` +
+                `**New revision**: ${result.revisionId}`,
+            },
+          ],
+          structuredContent: result,
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Error formatting document: ${handleGoogleError(error)}` }],
         };
       }
     }

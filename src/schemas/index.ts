@@ -100,7 +100,58 @@ export const UpdateDocumentSchema = z
     { message: "At least one of append_text or replace_all_text must be provided" }
   );
 
+export const FormatDocumentSchema = z
+  .object({
+    document_id: z
+      .string()
+      .min(1, "document_id is required")
+      .describe(
+        "Google Docs document ID. Found in the URL: docs.google.com/document/d/{document_id}/edit"
+      ),
+    requests: z
+      .array(
+        z.object({
+          match_text: z
+            .string()
+            .min(1)
+            .describe("Exact text to search for and format"),
+          style: z
+            .object({
+              bold: z.boolean().optional(),
+              italic: z.boolean().optional(),
+              underline: z.boolean().optional(),
+              strikethrough: z.boolean().optional(),
+              fontFamily: z.string().optional(),
+              fontSize: z.number().optional().describe("Font size in pt"),
+              textColor: z
+                .object({ r: z.number(), g: z.number(), b: z.number() })
+                .optional()
+                .describe("RGB values 0-1"),
+              backgroundColor: z
+                .object({ r: z.number(), g: z.number(), b: z.number() })
+                .optional()
+                .describe("RGB values 0-1"),
+            })
+            .optional(),
+          heading: z
+            .enum(["NORMAL_TEXT", "TITLE", "SUBTITLE", "HEADING_1", "HEADING_2", "HEADING_3", "HEADING_4", "HEADING_5", "HEADING_6"])
+            .optional(),
+          alignment: z
+            .enum(["START", "CENTER", "END", "JUSTIFIED"])
+            .optional(),
+          bullet_preset: z
+            .enum(["BULLET_DISC_CIRCLE_SQUARE", "NUMBERED_DECIMAL_ALPHA_ROMAN"])
+            .optional(),
+        })
+      )
+      .min(1, "At least one formatting request must be provided")
+      .max(20, "Cannot perform more than 20 formatting requests per operation")
+      .describe("List of formatting operations to apply"),
+  })
+  .strict();
+
 export type ListDocumentsInput = z.infer<typeof ListDocumentsSchema>;
 export type ReadDocumentInput = z.infer<typeof ReadDocumentSchema>;
 export type CreateDocumentInput = z.infer<typeof CreateDocumentSchema>;
 export type UpdateDocumentInput = z.infer<typeof UpdateDocumentSchema>;
+export type FormatDocumentInput = z.infer<typeof FormatDocumentSchema>;

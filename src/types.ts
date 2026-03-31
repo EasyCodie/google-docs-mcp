@@ -33,6 +33,14 @@ export interface UpdateDocumentResult {
   updatedSections: number;
 }
 
+export interface FormatDocumentResult {
+  [key: string]: unknown;
+  documentId: string;
+  title: string;
+  revisionId: string;
+  formattedSections: number;
+}
+
 export interface PaginatedDocuments {
   total: number;
   count: number;
